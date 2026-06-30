@@ -18,10 +18,23 @@ load_dotenv(ROOT_DIR / ".env")
 #client = AsyncIOMotorClient(mongo_url)
 #db = client[os.environ["DB_NAME"]]
 MONGO_URL = os.getenv("MONGO_URL")
-DB_NAME = os.getenv("DB_NAME", "health-assist-hub-2")
+DB_NAME = os.getenv("DB_NAME")
 
 if not MONGO_URL:
-    raise RuntimeError("MONGO_URL environment variable is missing")
+    raise RuntimeError("❌ MONGO_URL environment variable is missing")
+
+if not DB_NAME:
+    raise RuntimeError("❌ DB_NAME environment variable is missing")
+
+client = AsyncIOMotorClient(
+    MONGO_URL,
+    serverSelectionTimeoutMS=10000,
+    connectTimeoutMS=10000,
+    socketTimeoutMS=10000,
+)
+
+
+db = client[DB_NAME]
 
 client = AsyncIOMotorClient(
     MONGO_URL,
@@ -187,39 +200,63 @@ async def root():
 
 @api.get("/services", response_model=List[Service])
 async def list_services():
-    await _ensure_services_seeded()
-    items = await db.services.find().to_list(length=100)
-    return [Service(**_scrub(i)) for i in items]
+
+    try:
+        await _ensure_services_seeded()
+
+        items = await db.services.find().to_list(length=100)
+
+        return [Service(**_scrub(i)) for i in items]
+
+    except Exception as e:
+        logger.exception("Error loading services")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 
 @api.post("/bookings", response_model=Booking)
 async def create_booking(payload: BookingCreate):
-    svc = await db.services.find_one({"id": payload.service_id})
-    if not svc:
-        await _ensure_services_seeded()
-        svc = await db.services.find_one({"id": payload.service_id})
-    if not svc:
-        raise HTTPException(status_code=404, detail="Service not found")
 
-    booking = Booking(
-        service_id=svc["id"],
-        service_title=svc["title"],
-        service_image=svc["image"],
-        price=svc["price"],
-        duration=svc["duration"],
-        date=payload.date,
-        slot=payload.slot,
-        name=payload.name.strip(),
-        phone=_normalize_phone(payload.phone),
-        address=payload.address.strip(),
-        city=payload.city,
-        age=payload.age,
-        gender=payload.gender,
-        notes=payload.notes,
-        pay_method=payload.pay_method,
-    )
-    await db.bookings.insert_one(booking.dict())
-    return booking
+    try:
+        svc = await db.services.find_one({"id": payload.service_id})
+
+        if not svc:
+            await _ensure_services_seeded()
+            svc = await db.services.find_one({"id": payload.service_id})
+
+        if not svc:
+            raise HTTPException(status_code=404, detail="Service not found")
+
+        booking = Booking(
+            service_id=svc["id"],
+            service_title=svc["title"],
+            service_image=svc["image"],
+            price=svc["price"],
+            duration=svc["duration"],
+            date=payload.date,
+            slot=payload.slot,
+            name=payload.name.strip(),
+            phone=_normalize_phone(payload.phone),
+            address=payload.address.strip(),
+            city=payload.city,
+            age=payload.age,
+            gender=payload.gender,
+            notes=payload.notes,
+            pay_method=payload.pay_method,
+        )
+
+        await db.bookings.insert_one(booking.dict())
+
+        return booking
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("Booking Error")
+        raise HTTPException(500, detail=str(e))
 
 
 @api.get("/bookings", response_model=List[Booking])
@@ -329,6 +366,23 @@ async def admin_update_status(
         raise HTTPException(status_code=404, detail="Booking not found")
     return Booking(**_scrub(res))
 
+@app.get("/health")
+async def health():
+
+    try:
+        await client.admin.command("ping")
+
+        return {
+            "status": "healthy",
+            "database": "connected"
+        }
+
+    except Exception as e:
+
+        return {
+            "status": "unhealthy",
+            "database": str(e)
+        }
 
 app.include_router(api)
 
@@ -358,20 +412,20 @@ logger = logging.getLogger(__name__)
 
 
 @app.on_event("startup")
-async def _startup():
-    try:
-        # Verify MongoDB connection
-        await client.admin.command("ping")
-        logger.info("✅ MongoDB connected successfully")
+async def startup():
 
-        # Seed initial data
+    try:
+        await client.admin.command("ping")
+        logger.info("✅ MongoDB Connected")
+
         await _ensure_services_seeded()
+        logger.info("✅ Seed Data Checked")
 
     except Exception as e:
-        logger.error(f"❌ MongoDB connection failed: {e}")
+        logger.exception("MongoDB Startup Failed")
+        raise RuntimeError(str(e))
 
-    logger.info("🚀 Aevum Health API started")
-
+    logger.info("🚀 API Started Successfully")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
