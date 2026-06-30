@@ -14,9 +14,21 @@ from datetime import datetime
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-mongo_url = os.environ["MONGO_URL"]
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ["DB_NAME"]]
+#mongo_url = os.environ["MONGO_URL"]
+#client = AsyncIOMotorClient(mongo_url)
+#db = client[os.environ["DB_NAME"]]
+MONGO_URL = os.getenv("MONGO_URL")
+DB_NAME = os.getenv("DB_NAME", "health-assist-hub-2")
+
+if not MONGO_URL:
+    raise RuntimeError("MONGO_URL environment variable is missing")
+
+client = AsyncIOMotorClient(
+    MONGO_URL,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+)
+db = client[DB_NAME]
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "aevum-admin-2025")
 
@@ -347,8 +359,18 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def _startup():
-    await _ensure_services_seeded()
-    logger.info("Aevum Health API started")
+    try:
+        # Verify MongoDB connection
+        await client.admin.command("ping")
+        logger.info("✅ MongoDB connected successfully")
+
+        # Seed initial data
+        await _ensure_services_seeded()
+
+    except Exception as e:
+        logger.error(f"❌ MongoDB connection failed: {e}")
+
+    logger.info("🚀 Aevum Health API started")
 
 
 @app.on_event("shutdown")
